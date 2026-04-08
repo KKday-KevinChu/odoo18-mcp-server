@@ -6,6 +6,8 @@
 
 Odoo 18 MCP Server，使用 JSON-2 API 連線。**此分支為 SIT 測試環境版本。**
 
+> **SIT 預設開啟 `READONLY_MODE=true` + `VIEW_FILTERED_MODE=true`**，與 PRD 一致的安全設定。
+
 Based on [twtrubiks/odoo19-mcp-server](https://github.com/twtrubiks/odoo19-mcp-server), adapted for Odoo 18.
 
 ## 技術棧
@@ -173,6 +175,8 @@ claude mcp add odoo-mcp-server -- docker run -i --rm \
   -e ODOO_URL=https://sit-odoo.eip.kkday.net/ \
   -e ODOO_DATABASE=sit-odoo \
   -e ODOO_API_KEY=your_api_key_here \
+  -e READONLY_MODE=true \
+  -e VIEW_FILTERED_MODE=true \
   odoo18-mcp-server
 ```
 
@@ -190,6 +194,8 @@ services:
       - ODOO_URL=https://sit-odoo.eip.kkday.net/
       - ODOO_DATABASE=sit-odoo
       - ODOO_API_KEY=your_api_key_here
+      - READONLY_MODE=true
+      - VIEW_FILTERED_MODE=true
     command: ["python", "odoo_mcp_server.py", "--transport", "http", "--host", "0.0.0.0", "--port", "8000"]
     restart: unless-stopped
 ```
