@@ -189,7 +189,7 @@ def get_view_fields(client: "OdooJsonRpcClient", model: str) -> set[str]:
     """取得 model 在 tree + form view 中可見的欄位集合（含快取）。
 
     合併 tree view 和 form view 的欄位，確保用戶能看到
-    列表和表單上顯示的所有欄位。Odoo 的 fields_view_get()
+    列表和表單上顯示的所有欄位。Odoo 的 get_views()
     會自動根據當前用戶的 groups 過濾掉無權限的欄位。
 
     Args:
@@ -206,9 +206,9 @@ def get_view_fields(client: "OdooJsonRpcClient", model: str) -> set[str]:
 
     for view_type in ("list", "form"):
         try:
-            view_data = client.fields_view_get(model, view_type=view_type)
+            view_data = client.get_views(model, view_type=view_type)
 
-            # 方法 1：從 fields_view_get 回傳的 fields dict 取得
+            # 方法 1：從 get_views 回傳的 fields dict 取得
             # （已經過 ORM groups 過濾）
             if "fields" in view_data and isinstance(view_data["fields"], dict):
                 allowed_fields.update(view_data["fields"].keys())
@@ -274,13 +274,15 @@ class OdooJsonRpcClient:
         parsed = urlparse(url.rstrip("/"))
 
         # Determine protocol based on scheme
-        protocol = "json2s" if parsed.scheme == "https" else "json2"
+        # Odoo 18: use jsonrpc/jsonrpcs (legacy JSON-RPC over /jsonrpc endpoint)
+        # Odoo 19+: use json2/json2s (new doc-bearer API over /doc-bearer/)
+        protocol = "jsonrpcs" if parsed.scheme == "https" else "jsonrpc"
 
         # Extract host (hostname handles IPv6 correctly)
         host = parsed.hostname or parsed.netloc
 
         # Extract port with sensible defaults
-        port = parsed.port or (443 if protocol == "json2s" else 8069)
+        port = parsed.port or (443 if protocol == "jsonrpcs" else 8069)
 
         connection = odoolib.get_connection(
             hostname=host,
@@ -382,28 +384,35 @@ class OdooJsonRpcClient:
             kwargs["attributes"] = attributes
         return model_proxy.fields_get(**kwargs)
 
-    def fields_view_get(
+    def get_views(
         self,
         model: str,
         view_type: str = "form",
-        view_id: int | None = None,
     ) -> dict:
-        """呼叫 fields_view_get() 取得 view 定義。
+        """呼叫 get_views() 取得 view 定義（Odoo 18+）。
 
+        Odoo 18 已移除 fields_view_get()，改用 get_views()。
         回傳包含 arch (XML) 和 fields (已過濾 groups) 的字典。
-        Odoo 會自動根據當前用戶的 groups 過濾欄位。
 
         Args:
             model: 模型名稱 (e.g., 'res.partner')
             view_type: View 類型 ('form', 'list', 'tree', 'search' 等)
-            view_id: 指定 view ID，None 表示使用預設 view
 
         Returns:
             {'arch': '<tree>...</tree>', 'fields': {...}, 'model': '...', ...}
         """
         model_proxy = self.get_model(model)
-        # Odoo 18: list 和 tree 在 fields_view_get 中通用
-        return model_proxy.fields_view_get(view_id=view_id or False, view_type=view_type)
+        # get_views returns {views: {view_type: {arch, fields, ...}}, models: {...}}
+        result = model_proxy.get_views(views=[[False, view_type]])
+        # Extract the specific view type data
+        views = result.get("views", {})
+        view_data = views.get(view_type, {})
+        # Also merge field definitions from the models key
+        models = result.get("models", {})
+        model_fields = models.get(model, {})
+        if model_fields and "fields" not in view_data:
+            view_data["fields"] = model_fields
+        return view_data
 
     def get_user_context(self) -> dict:
         """取得當前用戶的 context（包含 uid, lang, tz 等）"""
