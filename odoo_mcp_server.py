@@ -49,8 +49,41 @@ ODOO_LOGIN = os.getenv("ODOO_LOGIN", "your_login_email_here")
 ODOO_API_KEY = os.getenv("ODOO_API_KEY", "your_api_key_here")
 READONLY_MODE = os.getenv("READONLY_MODE", "false").lower() == "true"
 VIEW_FILTERED_MODE = os.getenv("VIEW_FILTERED_MODE", "false").lower() == "true"
+MENU_FILTERED_MODE = os.getenv("MENU_FILTERED_MODE", "false").lower() == "true"
 
 logger = logging.getLogger(__name__)
+
+# =============================================================================
+# Access Rules (mcp-access-rules.json)
+# =============================================================================
+
+_ACCESS_RULES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mcp-access-rules.json")
+
+
+def _load_access_rules() -> dict:
+    """載入 MCP 存取規則設定檔。
+
+    mcp-access-rules.json 格式：
+    {
+        "blocked_models": ["google.mail.group", ...],
+        "field_blacklist": {
+            "hr.employee": ["birthday", "private_*", "identification_id", ...]
+        }
+    }
+
+    field_blacklist 支援 * 萬用字元（例如 "private_*" 匹配所有 private_ 開頭的欄位）
+    """
+    if os.path.exists(_ACCESS_RULES_PATH):
+        with open(_ACCESS_RULES_PATH) as f:
+            rules = json.load(f)
+        logger.info("Loaded access rules from %s", _ACCESS_RULES_PATH)
+        return rules
+    return {}
+
+
+ACCESS_RULES = _load_access_rules()
+BLOCKED_MODELS = set(ACCESS_RULES.get("blocked_models", []))
+FIELD_BLACKLIST = ACCESS_RULES.get("field_blacklist", {})
 
 
 # =============================================================================
@@ -131,6 +164,107 @@ def build_record_url(model: str, record_id: int) -> str:
     /web#id=<id>&model=<model>&view_type=form
     """
     return f"{ODOO_URL.rstrip('/')}/web#id={record_id}&model={model}&view_type=form"
+
+
+# =============================================================================
+# Menu-Filtered Mode + Access Rules
+# =============================================================================
+
+_menu_models_cache: set[str] | None = None
+
+
+def _match_field_pattern(field_name: str, pattern: str) -> bool:
+    """檢查欄位名稱是否匹配 pattern（支援 * 萬用字元）。
+
+    Examples:
+        _match_field_pattern("private_street", "private_*") → True
+        _match_field_pattern("birthday", "birthday") → True
+        _match_field_pattern("name", "private_*") → False
+    """
+    if "*" in pattern:
+        prefix = pattern.replace("*", "")
+        return field_name.startswith(prefix)
+    return field_name == pattern
+
+
+def get_menu_allowed_models(client: "OdooJsonRpcClient") -> set[str]:
+    """取得當前用戶透過 Menu 可存取的 model 集合（含快取）。
+
+    Odoo 的 ir.ui.menu 會自動根據用戶 groups 過濾，
+    所以只需要查 menu → action → res_model。
+    """
+    global _menu_models_cache
+    if _menu_models_cache is not None:
+        return _menu_models_cache
+
+    allowed: set[str] = set()
+    try:
+        menus = client.search_read(
+            "ir.ui.menu", [], fields=["action"], limit=500,
+        )
+        action_ids = []
+        for m in menus:
+            act = m.get("action")
+            if act and isinstance(act, str) and "act_window," in act:
+                action_ids.append(int(act.split(",")[1]))
+
+        if action_ids:
+            actions = client.read("ir.actions.act_window", action_ids, ["res_model"])
+            for a in actions:
+                if a.get("res_model"):
+                    allowed.add(a["res_model"])
+
+        logger.info("MENU_FILTERED_MODE: %d models accessible via menus", len(allowed))
+    except Exception:
+        logger.warning("Failed to load menu models, allowing all")
+        _menu_models_cache = None
+        return allowed
+
+    _menu_models_cache = allowed
+    return allowed
+
+
+def check_model_access(client: "OdooJsonRpcClient", model: str) -> None:
+    """檢查 model 是否允許透過 MCP 存取。
+
+    依序檢查：
+    1. Model 黑名單（mcp-access-rules.json 的 blocked_models）
+    2. Menu 過濾（MENU_FILTERED_MODE 開啟時）
+
+    不通過時拋出 ToolError。
+    """
+    # Layer 2: Model blacklist
+    if model in BLOCKED_MODELS:
+        raise ToolError(
+            f"Access denied: '{model}' is blocked by MCP access rules."
+        )
+
+    # Layer 1: Menu filtering
+    if MENU_FILTERED_MODE:
+        allowed = get_menu_allowed_models(client)
+        if allowed and model not in allowed:
+            raise ToolError(
+                f"Access denied: '{model}' is not accessible via any menu."
+            )
+
+
+def apply_field_blacklist(model: str, fields: list[str]) -> list[str]:
+    """套用欄位黑名單過濾（mcp-access-rules.json 的 field_blacklist）。
+
+    Args:
+        model: 模型名稱
+        fields: 原始欄位列表
+
+    Returns:
+        過濾後的欄位列表
+    """
+    patterns = FIELD_BLACKLIST.get(model, [])
+    if not patterns:
+        return fields
+    return [
+        f for f in fields
+        if not any(_match_field_pattern(f, p) for p in patterns)
+    ]
 
 
 def get_safe_fields(client: "OdooJsonRpcClient", model: str) -> list[str]:
@@ -273,6 +407,9 @@ def get_filtered_fields(client: "OdooJsonRpcClient", model: str) -> list[str]:
             ]
     else:
         result = get_safe_fields(client, model)
+
+    # Layer 3: Field blacklist (mcp-access-rules.json)
+    result = apply_field_blacklist(model, result)
 
     _filtered_fields_cache[cache_key] = result
     return result
@@ -660,6 +797,8 @@ def get_fields(
         - selection: List of [value, label] pairs (for selection fields)
         - comodel_name: Related model name (for relational fields)
     """
+    check_model_access(client, model)
+
     # 使用預設屬性或自訂屬性
     attrs = attributes or DEFAULT_FIELD_ATTRIBUTES
 
@@ -712,6 +851,7 @@ def execute_method(
     Note:
         In READONLY_MODE, write methods (create, write, unlink, copy) are blocked.
     """
+    check_model_access(client, model)
     check_readonly_mode(method)
     args = args or []
     kwargs = kwargs or {}
@@ -749,14 +889,17 @@ def search_records(
         JSON with records, total count, limit, and offset.
         Each record includes a '_url' field for direct browser access.
     """
+    check_model_access(client, model)
     domain = domain or []
 
     if fields is None:
         fields = get_filtered_fields(client, model)
     elif VIEW_FILTERED_MODE:
-        # 用戶指定了 fields，但仍需過濾掉 view 中不可見的欄位
         allowed = get_view_fields(client, model)
         fields = [f for f in fields if f in allowed]
+
+    # Always apply field blacklist (even when user specifies fields)
+    fields = apply_field_blacklist(model, fields)
 
     records = client.search_read(model, domain, fields=fields, limit=limit, offset=offset, order=order)
     total = client.search_count(model, domain)
@@ -796,6 +939,7 @@ def count_records(
     Returns:
         JSON string with the count
     """
+    check_model_access(client, model)
     domain = domain or []
     count = client.search_count(model, domain)
     return json.dumps({"model": model, "count": count}, indent=2)
@@ -821,11 +965,15 @@ def read_records(
         JSON string with the records. Each record includes a '_url' field
         for direct browser access to that record.
     """
+    check_model_access(client, model)
     if fields is None:
         fields = get_filtered_fields(client, model)
     elif VIEW_FILTERED_MODE:
         allowed = get_view_fields(client, model)
         fields = [f for f in fields if f in allowed]
+
+    # Always apply field blacklist
+    fields = apply_field_blacklist(model, fields)
 
     records = client.read(model, ids, fields=fields)
 
@@ -861,6 +1009,7 @@ def create_record(
     Note:
         In READONLY_MODE, this tool is hidden from LLM via tags.
     """
+    check_model_access(client, model)
     result = client.create(model, values)
     if isinstance(values, list):
         ids = result if isinstance(result, list) else [result]
@@ -911,6 +1060,7 @@ def update_record(
     Note:
         In READONLY_MODE, this tool is hidden from LLM via tags.
     """
+    check_model_access(client, model)
     result = client.write(model, ids, values)
 
     if result:
@@ -956,6 +1106,7 @@ def delete_record(
     Returns:
         JSON string with success status or pending confirmation
     """
+    check_model_access(client, model)
     if not confirm:
         return json.dumps(
             {
@@ -995,6 +1146,15 @@ if __name__ == "__main__":
 
     if VIEW_FILTERED_MODE:
         print("🔒 VIEW_FILTERED_MODE is enabled. Only view-visible fields are exposed.", file=sys.stderr)
+
+    if MENU_FILTERED_MODE:
+        print("🔒 MENU_FILTERED_MODE is enabled. Only menu-accessible models are exposed.", file=sys.stderr)
+
+    if BLOCKED_MODELS:
+        print(f"🚫 Blocked models: {', '.join(sorted(BLOCKED_MODELS))}", file=sys.stderr)
+
+    if FIELD_BLACKLIST:
+        print(f"🚫 Field blacklist active for: {', '.join(sorted(FIELD_BLACKLIST.keys()))}", file=sys.stderr)
 
     if args.transport == "stdio":
         mcp.run()

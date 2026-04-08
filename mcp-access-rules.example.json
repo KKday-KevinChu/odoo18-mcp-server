@@ -1,0 +1,61 @@
+{
+    "_comment": "MCP 存取規則 — 控制哪些 model/field 可透過 MCP 查詢",
+
+    "blocked_models": [
+        "google.mail.group",
+        "google.mail.group.member",
+        "google.alias",
+        "google.group.category",
+        "google.application",
+        "google.service",
+        "google.subscriptions",
+        "res.users",
+        "res.users.settings",
+        "ir.ui.menu",
+        "ir.ui.view",
+        "ir.module.module",
+        "ir.actions.report",
+        "ir.sequence",
+        "ir.default",
+        "ir.filters",
+        "ir.attachment",
+        "ir.embedded.actions",
+        "base.automation",
+        "mail.template",
+        "webhook.listener",
+        "webhook.notification"
+    ],
+
+    "field_blacklist": {
+        "hr.employee": [
+            "birthday",
+            "place_of_birth",
+            "country_of_birth",
+            "identification_id",
+            "ssnid",
+            "sinid",
+            "passport_id",
+            "gender",
+            "marital",
+            "spouse_complete_name",
+            "spouse_birthdate",
+            "children",
+            "certificate",
+            "study_field",
+            "study_field_id",
+            "study_school",
+            "study_school_id",
+            "private_*",
+            "emergency_*",
+            "bank_account_id",
+            "visa_no",
+            "visa_expire",
+            "permit_no",
+            "work_permit_expiration_date",
+            "work_permit_name",
+            "has_work_permit",
+            "km_home_work",
+            "private_car_plate"
+        ]
+    }
+}

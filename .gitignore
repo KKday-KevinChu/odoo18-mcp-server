@@ -16,6 +16,12 @@ env/
 .env
 .python-version
 
+# Deploy config (contains internal URLs - DO NOT commit)
+deploy-config.json
+
+# Access rules (may contain company-specific model/field names)
+mcp-access-rules.json
+
 # Linter / Formatter cache
 .mypy_cache/
 .ruff_cache/
