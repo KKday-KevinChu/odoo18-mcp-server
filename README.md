@@ -1,9 +1,12 @@
-# Odoo 18 MCP Server (JSON-2 API)
+# Odoo 18 MCP Server (JSON-2 API) — PRD 環境
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.13-blue?logo=python&logoColor=white)](https://www.python.org/)
+[![Environment](https://img.shields.io/badge/Environment-PRD-red)](https://odoo.eip.kkday.net/)
 
-Odoo 18 MCP Server，使用 JSON-2 API 連線。
+Odoo 18 MCP Server，使用 JSON-2 API 連線。**此分支為 PRD 正式環境版本。**
+
+> **PRD 預設開啟 `READONLY_MODE=true` + `VIEW_FILTERED_MODE=true`**，適合 HR 等非技術人員安全查詢。
 
 Based on [twtrubiks/odoo19-mcp-server](https://github.com/twtrubiks/odoo19-mcp-server), adapted for Odoo 18.
 
