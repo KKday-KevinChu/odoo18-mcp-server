@@ -232,11 +232,17 @@ def get_view_fields(client: "OdooJsonRpcClient", model: str) -> set[str]:
     return allowed_fields
 
 
+# 快取：{model: [field_names]} — 避免每次 search/read 都打 fields_get RPC
+_filtered_fields_cache: dict[str, list[str]] = {}
+
+
 def get_filtered_fields(client: "OdooJsonRpcClient", model: str) -> list[str]:
     """取得最終的欄位列表，根據 VIEW_FILTERED_MODE 決定過濾策略。
 
     - VIEW_FILTERED_MODE=false: 排除危險欄位（binary/image/html）
     - VIEW_FILTERED_MODE=true:  只回傳 view 中可見的欄位（更嚴格）
+
+    結果會快取，每個 model 只查一次 fields_get RPC。
 
     Args:
         client: Odoo JSON-RPC 客戶端
@@ -245,15 +251,31 @@ def get_filtered_fields(client: "OdooJsonRpcClient", model: str) -> list[str]:
     Returns:
         允許回傳的欄位名稱列表
     """
+    cache_key = f"{model}_{VIEW_FILTERED_MODE}"
+    if cache_key in _filtered_fields_cache:
+        return _filtered_fields_cache[cache_key]
+
     if VIEW_FILTERED_MODE:
         view_fields = get_view_fields(client, model)
-        # 額外排除危險欄位類型（即使在 view 中也不該透過 API 回傳 binary 資料）
-        fields_data = client.fields_get(model, attributes=["type"])
-        return [
-            f for f in view_fields
-            if f in fields_data and fields_data[f].get("type") not in DANGEROUS_FIELD_TYPES
-        ]
-    return get_safe_fields(client, model)
+        # 降級：如果 get_views 失敗只剩 id，fallback 到 safe fields
+        if len(view_fields) <= 1:
+            logger.warning(
+                "VIEW_FILTERED_MODE: No view fields for %s, falling back to safe fields",
+                model,
+            )
+            result = get_safe_fields(client, model)
+        else:
+            # 額外排除危險欄位類型（即使在 view 中也不該透過 API 回傳 binary 資料）
+            fields_data = client.fields_get(model, attributes=["type"])
+            result = [
+                f for f in view_fields
+                if f in fields_data and fields_data[f].get("type") not in DANGEROUS_FIELD_TYPES
+            ]
+    else:
+        result = get_safe_fields(client, model)
+
+    _filtered_fields_cache[cache_key] = result
+    return result
 
 
 # =============================================================================
