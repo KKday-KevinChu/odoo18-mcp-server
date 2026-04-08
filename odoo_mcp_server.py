@@ -204,21 +204,21 @@ def get_view_fields(client: "OdooJsonRpcClient", model: str) -> set[str]:
 
     allowed_fields: set[str] = set()
 
-    for view_type in ("list", "form"):
-        try:
-            view_data = client.get_views(model, view_type=view_type)
+    try:
+        # 一次取得 list + form view，減少 RPC round-trip
+        result = client.get_views(model, view_types=["list", "form"])
 
-            # 方法 1：從 get_views 回傳的 fields dict 取得
-            # （已經過 ORM groups 過濾）
-            if "fields" in view_data and isinstance(view_data["fields"], dict):
-                allowed_fields.update(view_data["fields"].keys())
+        # 方法 1：從 models 回傳的 fields dict 取得（已過濾 groups）
+        if "fields" in result and isinstance(result["fields"], dict):
+            allowed_fields.update(result["fields"].keys())
 
-            # 方法 2：從 arch XML 解析（補充 fields dict 可能遺漏的）
+        # 方法 2：從各 view 的 arch XML 解析（補充可能遺漏的）
+        for view_type, view_data in result.get("views", {}).items():
             if "arch" in view_data and isinstance(view_data["arch"], str):
                 allowed_fields.update(_extract_fields_from_arch(view_data["arch"]))
 
-        except Exception:
-            logger.warning("Failed to get %s view for %s", view_type, model)
+    except Exception:
+        logger.warning("Failed to get views for %s", model)
 
     # 永遠包含 id（需要用來組 URL 和識別 record）
     allowed_fields.add("id")
@@ -387,32 +387,35 @@ class OdooJsonRpcClient:
     def get_views(
         self,
         model: str,
-        view_type: str = "form",
+        view_types: list[str] | None = None,
     ) -> dict:
         """呼叫 get_views() 取得 view 定義（Odoo 18+）。
 
         Odoo 18 已移除 fields_view_get()，改用 get_views()。
-        回傳包含 arch (XML) 和 fields (已過濾 groups) 的字典。
+        一次取得多個 view type，減少 RPC round-trip。
 
         Args:
             model: 模型名稱 (e.g., 'res.partner')
-            view_type: View 類型 ('form', 'list', 'tree', 'search' 等)
+            view_types: View 類型列表 (e.g., ['list', 'form'])
 
         Returns:
-            {'arch': '<tree>...</tree>', 'fields': {...}, 'model': '...', ...}
+            {
+                'views': {'list': {'arch': '...', ...}, 'form': {'arch': '...', ...}},
+                'fields': {field_name: field_def, ...}  # 合併後的欄位定義
+            }
         """
+        if view_types is None:
+            view_types = ["list", "form"]
         model_proxy = self.get_model(model)
-        # get_views returns {views: {view_type: {arch, fields, ...}}, models: {...}}
-        result = model_proxy.get_views(views=[[False, view_type]])
-        # Extract the specific view type data
+        # Odoo 18 get_views response:
+        #   views: {view_type: {arch, id, model}} — arch XML per view
+        #   models: {model_name: {fields: {...}}} — field definitions
+        result = model_proxy.get_views(views=[[False, vt] for vt in view_types])
         views = result.get("views", {})
-        view_data = views.get(view_type, {})
-        # Also merge field definitions from the models key
-        models = result.get("models", {})
-        model_fields = models.get(model, {})
-        if model_fields and "fields" not in view_data:
-            view_data["fields"] = model_fields
-        return view_data
+        # Extract field definitions from models key
+        model_info = result.get("models", {}).get(model, {})
+        fields = model_info.get("fields", {}) if isinstance(model_info, dict) else {}
+        return {"views": views, "fields": fields}
 
     def get_user_context(self) -> dict:
         """取得當前用戶的 context（包含 uid, lang, tz 等）"""
