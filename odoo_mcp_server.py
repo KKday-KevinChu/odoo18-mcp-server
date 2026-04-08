@@ -43,8 +43,9 @@ load_dotenv()
 # Configuration
 # =============================================================================
 
-ODOO_URL = os.getenv("ODOO_URL", "https://odoo.eip.kkday.net/")
+ODOO_URL = os.getenv("ODOO_URL", "http://localhost:8069")
 ODOO_DATABASE = os.getenv("ODOO_DATABASE", "odoo")
+ODOO_LOGIN = os.getenv("ODOO_LOGIN", "your_login_email_here")
 ODOO_API_KEY = os.getenv("ODOO_API_KEY", "your_api_key_here")
 READONLY_MODE = os.getenv("READONLY_MODE", "false").lower() == "true"
 VIEW_FILTERED_MODE = os.getenv("VIEW_FILTERED_MODE", "false").lower() == "true"
@@ -267,7 +268,7 @@ class OdooJsonRpcClient:
     connection: Any
 
     @classmethod
-    def connect(cls, url: str, database: str, api_key: str) -> "OdooJsonRpcClient":
+    def connect(cls, url: str, database: str, login: str, api_key: str) -> "OdooJsonRpcClient":
         """Create a new connection to Odoo using JSON-RPC."""
         # Parse URL using urlparse for robust handling (IPv6, paths, etc.)
         parsed = urlparse(url.rstrip("/"))
@@ -285,7 +286,7 @@ class OdooJsonRpcClient:
             hostname=host,
             port=port,
             database=database,
-            login="api",  # Using API key auth
+            login=login,
             password=api_key,
             protocol=protocol,
         )
@@ -428,7 +429,7 @@ def get_shared_client() -> OdooJsonRpcClient:
     """
     global _client
     if _client is None:
-        _client = OdooJsonRpcClient.connect(ODOO_URL, ODOO_DATABASE, ODOO_API_KEY)
+        _client = OdooJsonRpcClient.connect(ODOO_URL, ODOO_DATABASE, ODOO_LOGIN, ODOO_API_KEY)
     return _client
 
 

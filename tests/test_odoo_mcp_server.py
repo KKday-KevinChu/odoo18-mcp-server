@@ -32,12 +32,12 @@ class TestConnect:
     def test_http_default_port(self, mock_get_conn):
         """http 沒給 port → 預設 8069."""
         mock_get_conn.return_value = MagicMock()
-        OdooJsonRpcClient.connect("http://myserver", "db", "key")
+        OdooJsonRpcClient.connect("http://myserver", "db", "user@test.com", "key")
         mock_get_conn.assert_called_once_with(
             hostname="myserver",
             port=8069,
             database="db",
-            login="api",
+            login="user@test.com",
             password="key",
             protocol="json2",
         )
@@ -46,12 +46,12 @@ class TestConnect:
     def test_https_default_port(self, mock_get_conn):
         """https 沒給 port → 預設 443，protocol 為 json2s."""
         mock_get_conn.return_value = MagicMock()
-        OdooJsonRpcClient.connect("https://myserver", "db", "key")
+        OdooJsonRpcClient.connect("https://myserver", "db", "user@test.com", "key")
         mock_get_conn.assert_called_once_with(
             hostname="myserver",
             port=443,
             database="db",
-            login="api",
+            login="user@test.com",
             password="key",
             protocol="json2s",
         )
@@ -60,12 +60,12 @@ class TestConnect:
     def test_explicit_port(self, mock_get_conn):
         """有明確給 port → 使用指定的 port."""
         mock_get_conn.return_value = MagicMock()
-        OdooJsonRpcClient.connect("http://myserver:8080", "db", "key")
+        OdooJsonRpcClient.connect("http://myserver:8080", "db", "user@test.com", "key")
         mock_get_conn.assert_called_once_with(
             hostname="myserver",
             port=8080,
             database="db",
-            login="api",
+            login="user@test.com",
             password="key",
             protocol="json2",
         )
@@ -74,12 +74,12 @@ class TestConnect:
     def test_trailing_slash_stripped(self, mock_get_conn):
         """URL 尾巴的 / 不應影響 hostname."""
         mock_get_conn.return_value = MagicMock()
-        OdooJsonRpcClient.connect("http://myserver:8069/", "db", "key")
+        OdooJsonRpcClient.connect("http://myserver:8069/", "db", "user@test.com", "key")
         mock_get_conn.assert_called_once_with(
             hostname="myserver",
             port=8069,
             database="db",
-            login="api",
+            login="user@test.com",
             password="key",
             protocol="json2",
         )
