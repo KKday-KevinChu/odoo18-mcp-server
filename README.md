@@ -1,9 +1,9 @@
-# Odoo 18 MCP Server (JSON-2 API)
+# Odoo 18 MCP Server (JSON-RPC API)
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.13-blue?logo=python&logoColor=white)](https://www.python.org/)
 
-Odoo 18 MCP Server，使用 JSON-2 API 連線。
+Odoo 18 MCP Server，使用 JSON-RPC API 連線。
 
 Based on [twtrubiks/odoo19-mcp-server](https://github.com/twtrubiks/odoo19-mcp-server), adapted for Odoo 18.
 
@@ -11,7 +11,7 @@ Based on [twtrubiks/odoo19-mcp-server](https://github.com/twtrubiks/odoo19-mcp-s
 
 - **Python**: 3.13
 - **FastMCP**: >=3.0.0,<4.0.0
-- **odoo-client-lib**: 2.0.1 (JSON-2 API)
+- **odoo-client-lib**: 2.0.1 (使用 `jsonrpc/jsonrpcs` protocol)
 
 ## 架構
 
@@ -30,7 +30,7 @@ flowchart TB
     end
 
     subgraph RPC["OdooJsonRpcClient"]
-        OL[odoolib<br/>json2/json2s protocol]
+        OL[odoolib<br/>jsonrpc/jsonrpcs protocol]
     end
 
     subgraph Odoo["Odoo 18 Server"]
@@ -49,8 +49,9 @@ flowchart TB
 | 項目 | Odoo 19 | Odoo 18 |
 |------|---------|---------|
 | Record URL 格式 | `/odoo/{model}/{id}` | `/web#id={id}&model={model}&view_type=form` |
+| RPC Protocol | `json2/json2s`（`/doc-bearer/`） | `jsonrpc/jsonrpcs`（`/jsonrpc`） |
+| View API | `fields_view_get()` | `get_views()`（`fields_view_get` 已移除） |
 | Domain operator | 支援 `any` | 不支援 `any`（用子查詢替代） |
-| 其他 | JSON-RPC 協定相同 | JSON-RPC 協定相同 |
 
 ## 環境變數
 
@@ -72,7 +73,10 @@ cp .env.example .env
 
 ### 如何取得 API Key
 
-1. 登入 Odoo（例如 https://your-odoo-server.com/）
+**推薦：使用 Setup Wizard**（`bash setup-hr.sh`），全自動完成。
+
+**手動方式**：
+1. 登入 Odoo
 2. 點擊右上角頭像 → **我的個人資料（My Profile）**
 3. 切換到 **帳號安全（Account Security）** 頁籤
 4. 找到 **API Keys** 區塊，點擊 **New API Key**
@@ -81,7 +85,41 @@ cp .env.example .env
 
 > **注意**：API Key 只會顯示一次，請妥善保存。API Key 的權限等同於該用戶帳號的權限。
 
-## 安裝
+## 快速設定（Setup Wizard）
+
+HR 等非技術人員只需執行一個指令：
+
+```bash
+bash setup-hr.sh
+```
+
+Wizard 會自動：
+1. 安裝 Python 虛擬環境和依賴
+2. 開啟瀏覽器選擇環境（SIT / PRD）
+3. 導到 Odoo 登入頁（SAML/SSO 自動登入）
+4. 點擊「Connect Claude Code」一鍵產生 API Key
+5. 自動寫入 `.env` 並註冊 MCP Server
+
+> **前提**：Odoo 上需安裝 `mcp_api_key` 模組（見下方）。
+
+### Odoo 模組：mcp_api_key
+
+`odoo_addons/mcp_api_key/` 提供 `/mcp/setup` 頁面，讓 SAML/SSO 用戶一鍵產生 API Key。
+
+**安裝方式**：將 `mcp_api_key/` 複製到 Odoo addons 路徑，然後在 Odoo 後台安裝「MCP API Key Generator」。
+
+**部署設定**：建立 `deploy-config.json`（已在 `.gitignore` 中）：
+```json
+{
+  "environments": {
+    "sit": {"name": "SIT (Testing)", "odoo_url": "https://your-sit.com/", "database": "sit-db"},
+    "prd": {"name": "Production", "odoo_url": "https://your-prd.com/", "database": "prd-db"}
+  },
+  "defaults": {"readonly_mode": true, "view_filtered_mode": true}
+}
+```
+
+## 手動安裝
 
 ```bash
 pip install -r requirements.txt
@@ -226,18 +264,18 @@ docker build -t odoo18-mcp-server .
 
 **問題**：Odoo 的 ORM API 會回傳用戶有權限的所有欄位，即使 UI 上沒有顯示（例如薪資、個資等）。
 
-**解決方案**：透過 `fields_view_get()` 取得 tree + form view 定義，只回傳 view 中可見的欄位。
+**解決方案**：透過 `get_views()` 取得 list + form view 定義，只回傳 view 中可見的欄位。
 
 ```
-一般模式:  search_records("hr.employee") → 100+ 個欄位（含薪資、個資）
-View 過濾: search_records("hr.employee") → 只有 tree/form view 上顯示的欄位
+一般模式:  search_records("hr.employee") → 209 個欄位（含薪資、個資）
+View 過濾: search_records("hr.employee") → 138 個欄位（只有 view 上顯示的）
 ```
 
 **運作方式**：
-1. 首次查詢某個 model 時，呼叫 `fields_view_get()` 取得 list + form view
-2. 解析 view XML，取得所有 `<field>` 的名稱
-3. 合併兩個 view 的欄位集合，快取結果
-4. 所有讀取操作（search_records、read_records、get_fields 等）只回傳這些欄位
+1. 首次查詢某個 model 時，呼叫 `get_views()` 一次取得 list + form view
+2. 從 `models` 回傳取得該用戶可見的欄位定義（已過濾 groups）
+3. 從 arch XML 解析 `<field>` 名稱作為補充
+4. 合併欄位集合並快取，所有讀取操作只回傳這些欄位
 5. 即使 LLM 嘗試指定不在 view 中的欄位，也會被過濾掉
 
 **建議 HR 使用的設定**（`.env`）：
