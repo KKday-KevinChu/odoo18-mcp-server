@@ -1,8 +1,7 @@
 import logging
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from odoo import http
-from odoo.fields import Date
 from odoo.http import request
 
 _logger = logging.getLogger(__name__)
@@ -58,6 +57,6 @@ class McpApiKeyController(http.Controller):
 
         # Redirect to local wizard with the key in URL fragment (#)
         # Fragment is NOT sent to server logs or proxy — safer than query string
-        login = user.email or user.login
-        redirect_url = f"{callback_url}#api_key={api_key}&login={login}"
+        login = quote(user.email or user.login, safe="")
+        redirect_url = f"{callback_url}#api_key={quote(api_key, safe='')}&login={login}"
         return request.redirect(redirect_url, code=302, local=False)
