@@ -11,6 +11,9 @@ Environment Variables:
     ODOO_DATABASE: Database name (default: odoo)
     ODOO_API_KEY: API key for authentication
     READONLY_MODE: Set to "true" to disable write operations (default: false)
+    VIEW_FILTERED_MODE: Set to "true" to restrict fields to only those
+        visible in Odoo views (tree + form). This prevents API users from
+        seeing fields not exposed in the UI. (default: false)
 """
 
 __version__ = "1.0.0"
@@ -18,8 +21,10 @@ __version__ = "1.0.0"
 import argparse
 import functools
 import json
+import logging
 import os
 import sys
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
@@ -42,6 +47,9 @@ ODOO_URL = os.getenv("ODOO_URL", "http://localhost:8069")
 ODOO_DATABASE = os.getenv("ODOO_DATABASE", "your_database_key_here")
 ODOO_API_KEY = os.getenv("ODOO_API_KEY", "your_api_key_here")
 READONLY_MODE = os.getenv("READONLY_MODE", "false").lower() == "true"
+VIEW_FILTERED_MODE = os.getenv("VIEW_FILTERED_MODE", "false").lower() == "true"
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -145,6 +153,106 @@ def get_safe_fields(client: "OdooJsonRpcClient", model: str) -> list[str]:
         for field_name, field_info in fields_data.items()
         if field_info.get("type") not in DANGEROUS_FIELD_TYPES
     ]
+
+
+# =============================================================================
+# View-Filtered Mode
+# =============================================================================
+
+# 快取：{model_name: set(field_names)} — 每個 model 只查一次
+_view_fields_cache: dict[str, set[str]] = {}
+
+
+def _extract_fields_from_arch(arch_xml: str) -> set[str]:
+    """從 view arch XML 中解析出所有 <field name="..."> 的欄位名稱。
+
+    Args:
+        arch_xml: View 的 XML 字串 (e.g., '<tree><field name="name"/>...</tree>')
+
+    Returns:
+        欄位名稱集合
+    """
+    fields: set[str] = set()
+    try:
+        root = ET.fromstring(arch_xml)
+        for field_elem in root.iter("field"):
+            name = field_elem.get("name")
+            if name:
+                fields.add(name)
+    except ET.ParseError:
+        logger.warning("Failed to parse view arch XML")
+    return fields
+
+
+def get_view_fields(client: "OdooJsonRpcClient", model: str) -> set[str]:
+    """取得 model 在 tree + form view 中可見的欄位集合（含快取）。
+
+    合併 tree view 和 form view 的欄位，確保用戶能看到
+    列表和表單上顯示的所有欄位。Odoo 的 fields_view_get()
+    會自動根據當前用戶的 groups 過濾掉無權限的欄位。
+
+    Args:
+        client: Odoo JSON-RPC 客戶端
+        model: 模型名稱 (e.g., 'hr.employee')
+
+    Returns:
+        可見欄位名稱集合（tree + form 聯集）
+    """
+    if model in _view_fields_cache:
+        return _view_fields_cache[model]
+
+    allowed_fields: set[str] = set()
+
+    for view_type in ("list", "form"):
+        try:
+            view_data = client.fields_view_get(model, view_type=view_type)
+
+            # 方法 1：從 fields_view_get 回傳的 fields dict 取得
+            # （已經過 ORM groups 過濾）
+            if "fields" in view_data and isinstance(view_data["fields"], dict):
+                allowed_fields.update(view_data["fields"].keys())
+
+            # 方法 2：從 arch XML 解析（補充 fields dict 可能遺漏的）
+            if "arch" in view_data and isinstance(view_data["arch"], str):
+                allowed_fields.update(_extract_fields_from_arch(view_data["arch"]))
+
+        except Exception:
+            logger.warning("Failed to get %s view for %s", view_type, model)
+
+    # 永遠包含 id（需要用來組 URL 和識別 record）
+    allowed_fields.add("id")
+
+    _view_fields_cache[model] = allowed_fields
+    logger.info(
+        "VIEW_FILTERED_MODE: %s has %d allowed fields (from tree + form views)",
+        model,
+        len(allowed_fields),
+    )
+    return allowed_fields
+
+
+def get_filtered_fields(client: "OdooJsonRpcClient", model: str) -> list[str]:
+    """取得最終的欄位列表，根據 VIEW_FILTERED_MODE 決定過濾策略。
+
+    - VIEW_FILTERED_MODE=false: 排除危險欄位（binary/image/html）
+    - VIEW_FILTERED_MODE=true:  只回傳 view 中可見的欄位（更嚴格）
+
+    Args:
+        client: Odoo JSON-RPC 客戶端
+        model: 模型名稱
+
+    Returns:
+        允許回傳的欄位名稱列表
+    """
+    if VIEW_FILTERED_MODE:
+        view_fields = get_view_fields(client, model)
+        # 額外排除危險欄位類型（即使在 view 中也不該透過 API 回傳 binary 資料）
+        fields_data = client.fields_get(model, attributes=["type"])
+        return [
+            f for f in view_fields
+            if f in fields_data and fields_data[f].get("type") not in DANGEROUS_FIELD_TYPES
+        ]
+    return get_safe_fields(client, model)
 
 
 # =============================================================================
@@ -273,6 +381,29 @@ class OdooJsonRpcClient:
             kwargs["attributes"] = attributes
         return model_proxy.fields_get(**kwargs)
 
+    def fields_view_get(
+        self,
+        model: str,
+        view_type: str = "form",
+        view_id: int | None = None,
+    ) -> dict:
+        """呼叫 fields_view_get() 取得 view 定義。
+
+        回傳包含 arch (XML) 和 fields (已過濾 groups) 的字典。
+        Odoo 會自動根據當前用戶的 groups 過濾欄位。
+
+        Args:
+            model: 模型名稱 (e.g., 'res.partner')
+            view_type: View 類型 ('form', 'list', 'tree', 'search' 等)
+            view_id: 指定 view ID，None 表示使用預設 view
+
+        Returns:
+            {'arch': '<tree>...</tree>', 'fields': {...}, 'model': '...', ...}
+        """
+        model_proxy = self.get_model(model)
+        # Odoo 18: list 和 tree 在 fields_view_get 中通用
+        return model_proxy.fields_view_get(view_id=view_id or False, view_type=view_type)
+
     def get_user_context(self) -> dict:
         """取得當前用戶的 context（包含 uid, lang, tz 等）"""
         return self.connection.get_user_context()
@@ -352,6 +483,11 @@ def get_model_fields(model_name: str, client: OdooJsonRpcClient = Depends(get_sh
         ],
     )
 
+    # VIEW_FILTERED_MODE: 只回傳 view 中可見的欄位定義
+    if VIEW_FILTERED_MODE:
+        allowed = get_view_fields(client, model_name)
+        fields_data = {k: v for k, v in fields_data.items() if k in allowed}
+
     # 轉換為列表格式
     result = []
     for field_name, field_info in fields_data.items():
@@ -369,7 +505,7 @@ def get_model_fields(model_name: str, client: OdooJsonRpcClient = Depends(get_sh
 def get_record(model_name: str, record_id: int, client: OdooJsonRpcClient = Depends(get_shared_client)) -> str:
     """Get a single record by ID (auto-excludes dangerous fields like binary/image/html)."""
     # 自動排除危險欄位（binary、image、html）
-    fields = get_safe_fields(client, model_name)
+    fields = get_filtered_fields(client, model_name)
     records = client.read(model_name, [int(record_id)], fields=fields)
     if records:
         return json.dumps(records[0], indent=2, ensure_ascii=False, default=format_datetime)
@@ -382,7 +518,7 @@ def get_current_user(client: OdooJsonRpcClient = Depends(get_shared_client)) -> 
     uid = client.get_current_uid()
     if uid is None:
         return json.dumps({"error": "Not authenticated"})
-    fields = get_safe_fields(client, "res.users")
+    fields = get_filtered_fields(client, "res.users")
     user_data = client.read("res.users", [uid], fields=fields)
     if user_data:
         user = user_data[0]
@@ -402,7 +538,7 @@ def get_current_company(client: OdooJsonRpcClient = Depends(get_shared_client)) 
 
     if user_data and user_data[0].get("company_id"):
         company_id = user_data[0]["company_id"][0]  # Many2one 返回 [id, name]
-        fields = get_safe_fields(client, "res.company")
+        fields = get_filtered_fields(client, "res.company")
         company_data = client.read("res.company", [company_id], fields=fields)
         if company_data:
             company = company_data[0]
@@ -495,6 +631,11 @@ def get_fields(
     # 取得欄位資訊
     fields_data = client.fields_get(model, allfields=fields, attributes=attrs)
 
+    # VIEW_FILTERED_MODE: 只回傳 view 中可見的欄位
+    if VIEW_FILTERED_MODE:
+        allowed = get_view_fields(client, model)
+        fields_data = {k: v for k, v in fields_data.items() if k in allowed}
+
     # 轉換為列表格式，並加入欄位名稱
     result = []
     for field_name, field_info in fields_data.items():
@@ -575,9 +716,12 @@ def search_records(
     """
     domain = domain or []
 
-    # 當 fields=None 時，自動排除危險欄位（binary、image、html）
     if fields is None:
-        fields = get_safe_fields(client, model)
+        fields = get_filtered_fields(client, model)
+    elif VIEW_FILTERED_MODE:
+        # 用戶指定了 fields，但仍需過濾掉 view 中不可見的欄位
+        allowed = get_view_fields(client, model)
+        fields = [f for f in fields if f in allowed]
 
     records = client.search_read(model, domain, fields=fields, limit=limit, offset=offset, order=order)
     total = client.search_count(model, domain)
@@ -642,9 +786,11 @@ def read_records(
         JSON string with the records. Each record includes a '_url' field
         for direct browser access to that record.
     """
-    # 當 fields=None 時，自動排除危險欄位（binary、image、html）
     if fields is None:
-        fields = get_safe_fields(client, model)
+        fields = get_filtered_fields(client, model)
+    elif VIEW_FILTERED_MODE:
+        allowed = get_view_fields(client, model)
+        fields = [f for f in fields if f in allowed]
 
     records = client.read(model, ids, fields=fields)
 
@@ -811,6 +957,9 @@ if __name__ == "__main__":
     if READONLY_MODE:
         mcp.disable(tags={"write"})
         print("⚠️  READONLY_MODE is enabled. Write tools are hidden.", file=sys.stderr)
+
+    if VIEW_FILTERED_MODE:
+        print("🔒 VIEW_FILTERED_MODE is enabled. Only view-visible fields are exposed.", file=sys.stderr)
 
     if args.transport == "stdio":
         mcp.run()

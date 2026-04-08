@@ -8,11 +8,15 @@ from fastmcp.exceptions import ToolError
 
 from odoo_mcp_server import (
     OdooJsonRpcClient,
+    _extract_fields_from_arch,
     _sanitize_error_message,
+    _view_fields_cache,
     create_record,
     delete_record,
     execute_method,
+    get_view_fields,
     handle_tool_errors,
+    read_records,
     search_records,
 )
 
@@ -347,3 +351,197 @@ class TestSanitizeErrorMessage:
         error_msg = str(exc_info.value)
         assert "field 'namee' does not exist" in error_msg
         assert "Traceback" not in error_msg
+
+
+# =============================================================================
+# 8. VIEW_FILTERED_MODE — View 可見欄位過濾
+# =============================================================================
+
+
+class TestExtractFieldsFromArch:
+    """測試從 view arch XML 解析欄位名稱."""
+
+    def test_tree_view(self):
+        """tree view 應正確解析所有 field."""
+        arch = '<tree><field name="name"/><field name="department_id"/><field name="job_title"/></tree>'
+        fields = _extract_fields_from_arch(arch)
+        assert fields == {"name", "department_id", "job_title"}
+
+    def test_form_view_nested(self):
+        """form view 嵌套結構應遞迴解析."""
+        arch = """<form>
+            <sheet>
+                <group>
+                    <field name="name"/>
+                    <field name="email"/>
+                </group>
+                <notebook>
+                    <page>
+                        <field name="phone"/>
+                    </page>
+                </notebook>
+            </sheet>
+        </form>"""
+        fields = _extract_fields_from_arch(arch)
+        assert fields == {"name", "email", "phone"}
+
+    def test_empty_view(self):
+        """空 view 回傳空集合."""
+        arch = "<tree></tree>"
+        fields = _extract_fields_from_arch(arch)
+        assert fields == set()
+
+    def test_invalid_xml(self):
+        """無效 XML 不 crash，回傳空集合."""
+        fields = _extract_fields_from_arch("not xml at all")
+        assert fields == set()
+
+    def test_field_without_name(self):
+        """沒有 name 屬性的 field 應忽略."""
+        arch = '<tree><field name="name"/><field/></tree>'
+        fields = _extract_fields_from_arch(arch)
+        assert fields == {"name"}
+
+
+class TestGetViewFields:
+    """測試 get_view_fields() 合併 tree + form view 欄位."""
+
+    def setup_method(self):
+        """每個測試前清除快取."""
+        _view_fields_cache.clear()
+
+    def _make_mock_client(self, list_fields, form_fields, list_arch=None, form_arch=None):
+        """建立 mock client，模擬 fields_view_get 回傳."""
+        mock_client = MagicMock()
+
+        def fake_fields_view_get(model, view_type="form", view_id=None):
+            if view_type == "list":
+                arch = list_arch or "<tree>" + "".join(f'<field name="{f}"/>' for f in list_fields) + "</tree>"
+                return {"arch": arch, "fields": {f: {"type": "char"} for f in list_fields}}
+            else:
+                arch = form_arch or "<form>" + "".join(f'<field name="{f}"/>' for f in form_fields) + "</form>"
+                return {"arch": arch, "fields": {f: {"type": "char"} for f in form_fields}}
+
+        mock_client.fields_view_get = fake_fields_view_get
+        return mock_client
+
+    def test_merges_tree_and_form(self):
+        """tree + form 的欄位應合併."""
+        client = self._make_mock_client(
+            list_fields=["name", "department_id"],
+            form_fields=["name", "email", "phone"],
+        )
+        result = get_view_fields(client, "hr.employee")
+        assert "name" in result
+        assert "department_id" in result
+        assert "email" in result
+        assert "phone" in result
+        assert "id" in result  # 永遠包含 id
+
+    def test_cache_hit(self):
+        """第二次呼叫應用快取，不再查 view."""
+        client = self._make_mock_client(
+            list_fields=["name"],
+            form_fields=["name", "email"],
+        )
+        result1 = get_view_fields(client, "hr.employee")
+        result2 = get_view_fields(client, "hr.employee")
+        assert result1 is result2  # 同一個物件（快取）
+
+    def test_view_error_graceful(self):
+        """view 查詢失敗不 crash，回傳至少有 id 的集合."""
+        mock_client = MagicMock()
+        mock_client.fields_view_get.side_effect = Exception("Access denied")
+        result = get_view_fields(mock_client, "hr.employee")
+        assert "id" in result
+
+
+class TestViewFilteredMode:
+    """測試 VIEW_FILTERED_MODE 下 search_records 和 read_records 的行為."""
+
+    def setup_method(self):
+        _view_fields_cache.clear()
+
+    def test_search_records_filters_fields(self, monkeypatch):
+        """VIEW_FILTERED_MODE=True 時，search_records 只回傳 view 可見欄位."""
+        monkeypatch.setattr("odoo_mcp_server.VIEW_FILTERED_MODE", True)
+
+        # 模擬 view 只有 name 和 department_id
+        _view_fields_cache["hr.employee"] = {"id", "name", "department_id"}
+
+        mock_client = MagicMock()
+        mock_client.fields_get.return_value = {
+            "id": {"type": "integer"},
+            "name": {"type": "char"},
+            "department_id": {"type": "many2one"},
+        }
+        mock_client.search_read.return_value = [
+            {"id": 1, "name": "Alice", "department_id": [1, "IT"]},
+        ]
+        mock_client.search_count.return_value = 1
+
+        result = json.loads(search_records(model="hr.employee", client=mock_client))
+        # 確認 search_read 被呼叫時只帶了允許的欄位
+        call_kwargs = mock_client.search_read.call_args
+        called_fields = call_kwargs.kwargs.get("fields") or call_kwargs[1].get("fields")
+        assert set(called_fields).issubset({"id", "name", "department_id"})
+
+    def test_search_records_blocks_extra_fields(self, monkeypatch):
+        """VIEW_FILTERED_MODE=True 時，用戶指定的不可見欄位被過濾掉."""
+        monkeypatch.setattr("odoo_mcp_server.VIEW_FILTERED_MODE", True)
+
+        _view_fields_cache["hr.employee"] = {"id", "name", "department_id"}
+
+        mock_client = MagicMock()
+        mock_client.search_read.return_value = [{"id": 1, "name": "Alice"}]
+        mock_client.search_count.return_value = 1
+
+        # 用戶嘗試指定 salary 欄位（不在 view 中）
+        search_records(
+            model="hr.employee",
+            fields=["name", "salary", "private_phone"],
+            client=mock_client,
+        )
+        call_kwargs = mock_client.search_read.call_args
+        called_fields = call_kwargs.kwargs.get("fields") or call_kwargs[1].get("fields")
+        assert "salary" not in called_fields
+        assert "private_phone" not in called_fields
+        assert "name" in called_fields
+
+    def test_read_records_filters_fields(self, monkeypatch):
+        """VIEW_FILTERED_MODE=True 時，read_records 也受限."""
+        monkeypatch.setattr("odoo_mcp_server.VIEW_FILTERED_MODE", True)
+
+        _view_fields_cache["hr.employee"] = {"id", "name"}
+
+        mock_client = MagicMock()
+        mock_client.fields_get.return_value = {
+            "id": {"type": "integer"},
+            "name": {"type": "char"},
+        }
+        mock_client.read.return_value = [{"id": 1, "name": "Alice"}]
+
+        read_records(model="hr.employee", ids=[1], client=mock_client)
+        call_args = mock_client.read.call_args
+        called_fields = call_args[0][2] if len(call_args[0]) > 2 else call_args.kwargs.get("fields")
+        assert "name" in called_fields
+
+    def test_disabled_returns_all_safe_fields(self, monkeypatch):
+        """VIEW_FILTERED_MODE=False 時，回傳所有安全欄位（原行為）."""
+        monkeypatch.setattr("odoo_mcp_server.VIEW_FILTERED_MODE", False)
+
+        mock_client = MagicMock()
+        mock_client.fields_get.return_value = {
+            "name": {"type": "char"},
+            "salary": {"type": "float"},
+            "photo": {"type": "binary"},  # 應被排除
+        }
+        mock_client.search_read.return_value = []
+        mock_client.search_count.return_value = 0
+
+        search_records(model="hr.employee", client=mock_client)
+        call_kwargs = mock_client.search_read.call_args
+        called_fields = call_kwargs.kwargs.get("fields") or call_kwargs[1].get("fields")
+        assert "name" in called_fields
+        assert "salary" in called_fields
+        assert "photo" not in called_fields  # binary 被排除

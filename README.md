@@ -60,6 +60,7 @@ flowchart TB
 | `ODOO_DATABASE` | 資料庫名稱 | - |
 | `ODOO_API_KEY` | API Key 認證 | - |
 | `READONLY_MODE` | 唯讀模式（禁止寫入操作） | `false` |
+| `VIEW_FILTERED_MODE` | View 欄位過濾模式（只回傳 UI 可見欄位） | `false` |
 
 建立 `.env` 檔案：
 
@@ -195,6 +196,32 @@ docker build -t odoo18-mcp-server .
 設定 `READONLY_MODE=true` 啟用唯讀模式，適用於生產環境查詢：
 
 - 寫入工具（`create_record`、`update_record`、`delete_record`、`execute_method`）透過 FastMCP tags 直接隱藏，LLM 不會看到這些工具
+
+### View 欄位過濾模式（本專案新增）
+
+設定 `VIEW_FILTERED_MODE=true` 啟用，**適用於讓非技術人員（如 HR）安全使用 MCP 查詢 PRD 資料**。
+
+**問題**：Odoo 的 ORM API 會回傳用戶有權限的所有欄位，即使 UI 上沒有顯示（例如薪資、個資等）。
+
+**解決方案**：透過 `fields_view_get()` 取得 tree + form view 定義，只回傳 view 中可見的欄位。
+
+```
+一般模式:  search_records("hr.employee") → 100+ 個欄位（含薪資、個資）
+View 過濾: search_records("hr.employee") → 只有 tree/form view 上顯示的欄位
+```
+
+**運作方式**：
+1. 首次查詢某個 model 時，呼叫 `fields_view_get()` 取得 list + form view
+2. 解析 view XML，取得所有 `<field>` 的名稱
+3. 合併兩個 view 的欄位集合，快取結果
+4. 所有讀取操作（search_records、read_records、get_fields 等）只回傳這些欄位
+5. 即使 LLM 嘗試指定不在 view 中的欄位，也會被過濾掉
+
+**建議 HR 使用的設定**：
+```bash
+READONLY_MODE=true          # 禁止寫入
+VIEW_FILTERED_MODE=true     # 只看 view 可見欄位
+```
 
 ### 刪除二次確認
 

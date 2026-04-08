@@ -26,6 +26,7 @@ USER appuser
 ENV ODOO_URL=""
 ENV ODOO_DATABASE=""
 ENV READONLY_MODE=false
+ENV VIEW_FILTERED_MODE=false
 
 # 預設使用 stdio 傳輸層（適合 Claude CLI/Desktop）
 # HTTP 模式: docker run -p 8000:8000 odoo18-mcp-server python odoo_mcp_server.py --transport http --host 0.0.0.0 --port 8000
